@@ -9,9 +9,11 @@ DATA_DIR="$AGH_PATH/data"
 # Временная директория для скачивания
 TEMP_DIR="/tmp/AdGuardHome_update"
 # Путь для резервных копий
-BACKUP_DIR="/root/agh-backup"
+BACKUP_DIR="/tmp/AdGuard-backup"
 # Файл логов
 LOG_FILE="/var/log/adguardhome-update.log"
+# Максимальный размер лога (в байтах, 1 МБ = 1048576 байт)
+MAX_LOG_SIZE=1048576
 # Архитектура
 ARCH="linux_amd64"
 # URL для проверки последней версии
@@ -22,6 +24,8 @@ DOWNLOAD_URL="https://static.adguard.com/adguardhome/release/AdGuardHome_${ARCH}
 FALLBACK_FILE="/tmp/test.tar.gz"
 # Резервная версия, если GitHub API недоступен
 FALLBACK_VERSION="v0.107.61"
+# DNS-серверы для проверки (по умолчанию Cloudflare, можно заменить, например, на Яндекс: 77.88.8.8,77.88.8.1)
+DNS_SERVERS="1.1.1.1"
 
 # Функция логирования
 log() {
@@ -35,6 +39,33 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
+# Проверка существования директории логов и создание, если отсутствует
+LOG_DIR=$(dirname "$LOG_FILE")
+if [[ ! -d "$LOG_DIR" ]]; then
+    mkdir -p "$LOG_DIR"
+    if [[ $? -ne 0 ]]; then
+        echo "Ошибка: Не удалось создать директорию логов $LOG_DIR."
+        exit 1
+    fi
+fi
+
+# Проверка размера лог-файла и пересоздание, если > 1 МБ
+if [[ -f "$LOG_FILE" ]]; then
+    LOG_SIZE=$(wc -c < "$LOG_FILE" 2>/dev/null)
+    if [[ -n "$LOG_SIZE" && $LOG_SIZE -gt $MAX_LOG_SIZE ]]; then
+        log "Лог-файл превысил 1 МБ ($LOG_SIZE байт), пересоздаём..."
+        : > "$LOG_FILE"
+        log "Лог-файл пересоздан."
+    fi
+else
+    # Создаём лог-файл, если он не существует
+    touch "$LOG_FILE"
+    if [[ $? -ne 0 ]]; then
+        echo "Ошибка: Не удалось создать лог-файл $LOG_FILE."
+        exit 1
+    fi
+fi
+
 # Проверка наличия необходимых утилит
 log "Проверка наличия утилит..."
 for cmd in curl jq tar systemctl nslookup; do
@@ -45,6 +76,16 @@ for cmd in curl jq tar systemctl nslookup; do
 done
 log "Все необходимые утилиты установлены."
 
+# Проверка существования службы adguardhome.service
+if ! systemctl is-enabled adguardhome.service >/dev/null 2>&1; then
+    log "Ошибка: Служба adguardhome.service не найдена или не включена."
+    log "Создайте службу, используя пример конфигурации:"
+    log "[Unit]\nDescription=AdGuard Home DNS Service\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nUser=adguard\nGroup=adguard\nExecStart=/opt/AdGuardHome/AdGuardHome -c /opt/AdGuardHome/AdGuardHome.yaml\nRestart=on-failure\nRestartSec=5\nAmbientCapabilities=CAP_NET_BIND_SERVICE\nCapabilityBoundingSet=CAP_NET_BIND_SERVICE\nReadWritePaths=/opt/AdGuardHome\n\n[Install]\nWantedBy=multi-user.target"
+    log "Сохраните в /etc/systemd/system/adguardhome.service и выполните: sudo systemctl enable --now adguardhome.service"
+    exit 1
+fi
+log "Служба adguardhome.service найдена и активна."
+
 # Проверка места на диске
 log "Проверка места на диске..."
 if ! df -h /tmp | grep -q "Avail"; then
@@ -52,6 +93,15 @@ if ! df -h /tmp | grep -q "Avail"; then
     exit 1
 fi
 log "Место на диске в /tmp доступно."
+
+# Создание директории для резервных копий, если отсутствует
+if [[ ! -d "$BACKUP_DIR" ]]; then
+    mkdir -p "$BACKUP_DIR"
+    if [[ $? -ne 0 ]]; then
+        log "Ошибка: Не удалось создать директорию $BACKUP_DIR."
+        exit 1
+    fi
+fi
 
 # Очистка старых резервных копий
 log "Очистка старых резервных копий..."
@@ -67,7 +117,7 @@ fi
 log "Очистка резервных копий завершена. Хранится $BACKUP_COUNT копий."
 
 # Создание директорий, если их нет
-mkdir -p "$BACKUP_DIR" "$TEMP_DIR" "$(dirname "$LOG_FILE")"
+mkdir -p "$TEMP_DIR" "$(dirname "$LOG_FILE")"
 if [[ ! -w "$TEMP_DIR" ]]; then
     log "Ошибка: Нет прав на запись в $TEMP_DIR."
     exit 1
@@ -76,22 +126,22 @@ log "Директории созданы и доступны для записи
 
 # Проверка DNS
 log "Проверка разрешения DNS для github.com и static.adguard.com..."
-NSLOOKUP_GITHUB=$(nslookup github.com 1.1.1.1 2>&1)
+NSLOOKUP_GITHUB=$(nslookup github.com $DNS_SERVERS 2>&1)
 if [[ $? -ne 0 ]]; then
-    log "Ошибка: Не удалось разрешить github.com через 1.1.1.1. Вывод: $NSLOOKUP_GITHUB"
+    log "Ошибка: Не удалось разрешить github.com через $DNS_SERVERS. Вывод: $NSLOOKUP_GITHUB"
     exit 1
 fi
-NSLOOKUP_ADGUARD=$(nslookup static.adguard.com 1.1.1.1 2>&1)
+NSLOOKUP_ADGUARD=$(nslookup static.adguard.com $DNS_SERVERS 2>&1)
 if [[ $? -ne 0 ]]; then
-    log "Ошибка: Не удалось разрешить static.adguard.com через 1.1.1.1. Вывод: $NSLOOKUP_ADGUARD"
+    log "Ошибка: Не удалось разрешить static.adguard.com через $DNS_SERVERS. Вывод: $NSLOOKUP_ADGUARD"
     exit 1
 fi
 log "DNS работает корректно."
 
 # Проверка сетевой доступности
 log "Проверка сетевой доступности..."
-if ! ping -c 1 1.1.1.1 &> /dev/null; then
-    log "Ошибка: Нет сетевого соединения с 1.1.1.1."
+if ! ping -c 1 $DNS_SERVERS &> /dev/null; then
+    log "Ошибка: Нет сетевого соединения с $DNS_SERVERS."
     exit 1
 fi
 log "Сетевое соединение доступно."
