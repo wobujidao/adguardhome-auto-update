@@ -12,6 +12,8 @@ TEMP_DIR="/tmp/AdGuardHome_update"
 BACKUP_DIR="/tmp/AdGuard-backup"
 # Файл логов
 LOG_FILE="/var/log/adguardhome-update.log"
+# Временный файл для лога текущей операции
+CURRENT_LOG="/tmp/adguardhome-current.log"
 # Максимальный размер лога (в байтах, 1 МБ = 1048576 байт)
 MAX_LOG_SIZE=1048576
 # Архитектура
@@ -26,12 +28,28 @@ FALLBACK_FILE="/tmp/test.tar.gz"
 FALLBACK_VERSION="v0.107.61"
 # DNS-серверы для проверки (по умолчанию Cloudflare, можно заменить, например, на Яндекс: 77.88.8.8,77.88.8.1)
 DNS_SERVERS="1.1.1.1"
-# Настройки Telegram-уведомлений (отключены по умолчанию)
+# Настройки Telegram-увedomлений (отключены по умолчанию)
 ENABLE_TELEGRAM="false"  # Установите "true" для включения уведомлений
 TELEGRAM_BOT_TOKEN=""    # Укажите токен вашего Telegram-бота
 TELEGRAM_CHAT_ID=""      # Укажите ID чата или пользователя
 # Имя сервера (если пустое, используется системное имя хоста)
 SERVER_NAME=""
+# Флаг принудительной отправки Telegram-уведомлений
+FORCE_TELEGRAM="false"
+
+# Обработка аргументов командной строки
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --telegram)
+            FORCE_TELEGRAM="true"
+            shift
+            ;;
+        *)
+            echo "Неизвестный параметр: $1"
+            exit 1
+            ;;
+    esac
+done
 
 # Установка имени сервера
 if [[ -z "$SERVER_NAME" ]]; then
@@ -41,11 +59,22 @@ fi
 # Функция логирования
 log() {
     local message="[$SERVER_NAME] $1"
-    # Записываем в лог только если файл доступен для записи
+    # Записываем в основной лог
     if [[ -w "$LOG_FILE" ]]; then
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] $message" >> "$LOG_FILE"
     fi
+    # Записываем в лог текущей операции
+    if [[ -w "$CURRENT_LOG" ]]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] $message" >> "$CURRENT_LOG"
+    fi
     echo "$message"
+}
+
+# Функция логирования статуса операции
+log_status() {
+    local operation="$1"
+    local status="$2"
+    log "$operation: [$status]"
 }
 
 # Функция отправки уведомлений в Telegram
@@ -63,14 +92,29 @@ handle_error() {
     local exit_code=$?
     if [[ $exit_code -ne 0 && "$ENABLE_TELEGRAM" == "true" && -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_ID" ]]; then
         local log_content
-        log_content=$(tail -n 50 "$LOG_FILE" 2>/dev/null || echo "Лог-файл недоступен")
+        log_content=$(cat "$CURRENT_LOG" 2>/dev/null || echo "Лог текущей операции недоступен")
         send_telegram "[$SERVER_NAME] Ошибка в скрипте AdGuard Home:\n$log_content"
     fi
+    # Очищаем временный лог и добавляем пустую строку в основной лог
+    [[ -f "$CURRENT_LOG" ]] && rm -f "$CURRENT_LOG"
+    [[ -w "$LOG_FILE" ]] && echo "" >> "$LOG_FILE"
     exit $exit_code
+}
+
+# Функция отправки лога в Telegram при завершении (если указан --telegram)
+send_final_telegram() {
+    if [[ "$FORCE_TELEGRAM" == "true" && -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_ID" ]]; then
+        local log_content
+        log_content=$(cat "$CURRENT_LOG" 2>/dev/null || echo "Лог текущей операции недоступен")
+        send_telegram "[$SERVER_NAME] Результат выполнения скрипта AdGuard Home:\n$log_content"
+    fi
 }
 
 # Устанавливаем обработчик ошибок
 trap handle_error EXIT
+
+# Очищаем временный лог перед началом
+: > "$CURRENT_LOG"
 
 # Проверка прав root
 if [[ $EUID -ne 0 ]]; then
@@ -114,6 +158,9 @@ if [[ -f "$LOG_FILE" ]]; then
         log "Лог-файл превысил $(($MAX_LOG_SIZE / 1024)) КБ ($LOG_SIZE байт), пересоздаём..."
         : > "$LOG_FILE"
         log "Лог-файл пересоздан."
+        log_status "Пересоздание лога" "ОК"
+    else
+        log_status "Проверка размера лога" "ОК"
     fi
 fi
 
@@ -125,9 +172,10 @@ for cmd in curl jq tar systemctl nslookup; do
         exit 1
     fi
 done
-log "Все необходимые утилиты установлены."
+log_status "Проверка утилит" "ОК"
 
 # Проверка существования службы adguardhome.service
+log "Проверка службы adguardhome.service..."
 if ! systemctl is-enabled adguardhome.service >/dev/null 2>&1; then
     log "Ошибка: Служба adguardhome.service не найдена или не включена."
     log "Создайте службу, используя пример конфигурации:"
@@ -135,7 +183,7 @@ if ! systemctl is-enabled adguardhome.service >/dev/null 2>&1; then
     log "Сохраните в /etc/systemd/system/adguardhome.service и выполните: sudo systemctl enable --now adguardhome.service"
     exit 1
 fi
-log "Служба adguardhome.service найдена и активна."
+log_status "Проверка службы" "ОК"
 
 # Проверка места на диске
 log "Проверка места на диске..."
@@ -143,15 +191,17 @@ if ! df -h /tmp | grep -q "Avail"; then
     log "Ошибка: Недостаточно места на диске в /tmp."
     exit 1
 fi
-log "Место на диске в /tmp доступно."
+log_status "Проверка диска" "ОК"
 
 # Создание директории для резервных копий, если отсутствует
 if [[ ! -d "$BACKUP_DIR" ]]; then
+    log "Создание директории для резервных копий $BACKUP_DIR..."
     mkdir -p "$BACKUP_DIR"
     if [[ $? -ne 0 ]]; then
         log "Ошибка: Не удалось создать директорию $BACKUP_DIR."
         exit 1
     fi
+    log_status "Создание директории копий" "ОК"
 fi
 
 # Очистка старых резервных копий
@@ -165,15 +215,16 @@ if [[ $BACKUP_COUNT -gt 2 ]]; then
     # Пересчитываем количество копий после удаления
     BACKUP_COUNT=$(ls -1 "$BACKUP_DIR" | grep '^backup_' | wc -l)
 fi
-log "Очистка резервных копий завершена. Хранится $BACKUP_COUNT копий."
+log_status "Очистка копий" "ОК ($BACKUP_COUNT копий)"
 
 # Создание директорий, если их нет
+log "Проверка наличия временных директорий..."
 mkdir -p "$TEMP_DIR" "$(dirname "$LOG_FILE")"
 if [[ ! -w "$TEMP_DIR" ]]; then
     log "Ошибка: Нет прав на запись в $TEMP_DIR."
     exit 1
 fi
-log "Директории созданы и доступны для записи."
+log_status "Проверка директорий" "ОК"
 
 # Проверка DNS
 log "Проверка разрешения DNS для github.com и static.adguard.com..."
@@ -187,7 +238,7 @@ if [[ $? -ne 0 ]]; then
     log "Ошибка: Не удалось разрешить static.adguard.com через $DNS_SERVERS. Вывод: $NSLOOKUP_ADGUARD"
     exit 1
 fi
-log "DNS работает корректно."
+log_status "Проверка DNS" "ОК"
 
 # Проверка сетевой доступности
 log "Проверка сетевой доступности..."
@@ -195,7 +246,7 @@ if ! ping -c 1 $DNS_SERVERS &> /dev/null; then
     log "Ошибка: Нет сетевого соединения с $DNS_SERVERS."
     exit 1
 fi
-log "Сетевое соединение доступно."
+log_status "Проверка сети" "ОК"
 
 # Получение текущей версии
 log "Получение текущей версии AdGuard Home..."
@@ -204,7 +255,7 @@ if [[ -z "$CURRENT_VERSION" ]]; then
     log "Ошибка: Не удалось определить текущую версию AdGuard Home."
     exit 1
 fi
-log "Текущая версия: $CURRENT_VERSION"
+log_status "Получение текущей версии" "ОК ($CURRENT_VERSION)"
 
 # Получение последней версии с GitHub
 log "Получение последней версии с GitHub..."
@@ -225,14 +276,20 @@ else
         LATEST_VERSION="$FALLBACK_VERSION"
     fi
 fi
-log "Последняя версия: $LATEST_VERSION"
+log_status "Получение последней версии" "ОК ($LATEST_VERSION)"
 
 # Сравнение версий
 if [[ "$CURRENT_VERSION" == "$LATEST_VERSION" ]]; then
     log "Обновление не требуется, установлена последняя версия."
+    log_status "Проверка необходимости обновления" "ОК"
+    send_final_telegram
+    # Очищаем временный лог и добавляем пустую строку в основной лог
+    [[ -f "$CURRENT_LOG" ]] && rm -f "$CURRENT_LOG"
+    [[ -w "$LOG_FILE" ]] && echo "" >> "$LOG_FILE"
     exit 0
 fi
 log "Доступна новая версия $LATEST_VERSION, продолжаем..."
+log_status "Проверка необходимости обновления" "ОК (новая версия $LATEST_VERSION)"
 
 # Скачивание новой версии
 log "Скачивание новой версии из $DOWNLOAD_URL..."
@@ -244,10 +301,13 @@ if [[ $CURL_EXIT -ne 0 ]]; then
     if [[ -s "$FALLBACK_FILE" ]]; then
         log "Используем локальный файл $FALLBACK_FILE..."
         cp "$FALLBACK_FILE" "$TEMP_DIR/AdGuardHome.tar.gz"
+        log_status "Использование резервного файла" "ОК"
     else
         log "Ошибка: Локальный файл $FALLBACK_FILE отсутствует или пустой."
         exit 1
     fi
+else
+    log_status "Скачивание новой версии" "ОК"
 fi
 
 # Проверка целостности файла
@@ -256,10 +316,11 @@ if [[ ! -s "$TEMP_DIR/AdGuardHome.tar.gz" ]]; then
     log "Ошибка: Скачанный файл пустой или повреждён."
     exit 1
 fi
-log "Файл успешно скачан и проверен."
+log_status "Проверка целостности файла" "ОК"
 
 # Все проверки пройдены, начинаем обновление
 log "Все предварительные проверки пройдены, начинаем обновление..."
+log_status "Предварительные проверки" "ОК"
 
 # Остановка службы
 log "Остановка службы AdGuard Home..."
@@ -268,6 +329,7 @@ if [[ $? -ne 0 ]]; then
     log "Ошибка: Не удалось остановить службу AdGuard Home."
     exit 1
 fi
+log_status "Остановка службы" "ОК"
 
 # Создание резервной копии
 BACKUP_TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
@@ -280,6 +342,7 @@ if [[ $? -ne 0 ]]; then
     systemctl start adguardhome.service
     exit 1
 fi
+log_status "Создание резервной копии" "ОК"
 
 # Распаковка
 log "Распаковка архива..."
@@ -289,6 +352,7 @@ if [[ $? -ne 0 ]]; then
     systemctl start adguardhome.service
     exit 1
 fi
+log_status "Распаковка архива" "ОК"
 
 # Замена исполняемого файла
 log "Обновление исполняемого файла..."
@@ -299,17 +363,21 @@ if [[ $? -ne 0 ]]; then
     exit 1
 fi
 chmod +x "$AGH_PATH/AdGuardHome"
+log_status "Обновление исполняемого файла" "ОК"
 
 # Копирование документации (опционально)
+log "Копирование документации..."
 for doc in CHANGELOG.md README.md LICENSE.txt; do
     if [[ -f "$TEMP_DIR/AdGuardHome/$doc" ]]; then
         cp "$TEMP_DIR/AdGuardHome/$doc" "$AGH_PATH/$doc"
     fi
 done
+log_status "Копирование документации" "ОК"
 
 # Очистка временной директории
+log "Очистка временной директории..."
 rm -rf "$TEMP_DIR"
-log "Временная директория очищена."
+log_status "Очистка временной директории" "ОК"
 
 # Запуск службы
 log "Запуск службы AdGuard Home..."
@@ -318,15 +386,18 @@ if [[ $? -ne 0 ]]; then
     log "Ошибка: Не удалось запустить службу AdGuard Home."
     exit 1
 fi
+log_status "Запуск службы" "ОК"
 
 # Проверка статуса службы
+log "Проверка статуса службы..."
 sleep 5
 if systemctl is-active --quiet adguardhome.service; then
     log "Обновление успешно завершено. AdGuard Home работает."
+    log_status "Проверка статуса службы" "ОК"
     # Отправляем лог в Telegram при успешном обновлении
     if [[ "$ENABLE_TELEGRAM" == "true" && -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_ID" ]]; then
         local log_content
-        log_content=$(tail -n 50 "$LOG_FILE" 2>/dev/null || echo "Лог-файл недоступен")
+        log_content=$(cat "$CURRENT_LOG" 2>/dev/null || echo "Лог текущей операции недоступен")
         send_telegram "[$SERVER_NAME] AdGuard Home успешно обновлён до $NEW_VERSION:\n$log_content"
     fi
 else
@@ -335,5 +406,14 @@ else
 fi
 
 # Проверка новой версии
+log "Проверка новой версии..."
 NEW_VERSION=$("$AGH_PATH/AdGuardHome" --version | grep -oP 'v\d+\.\d+\.\d+')
 log "Новая установленная версия: $NEW_VERSION"
+log_status "Проверка новой версии" "ОК"
+
+# Отправляем финальное уведомление, если указан --telegram
+send_final_telegram
+
+# Очищаем временный лог и добавляем пустую строку в основной лог
+[[ -f "$CURRENT_LOG" ]] && rm -f "$CURRENT_LOG"
+[[ -w "$LOG_FILE" ]] && echo "" >> "$LOG_FILE"
