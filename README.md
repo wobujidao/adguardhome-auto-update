@@ -8,10 +8,11 @@
 - **Безопасное обновление**: Останавливает службу только после успешного скачивания и проверки обновления.
 - **Резервное копирование**: Создаёт копии конфигурации (`AdGuardHome.yaml`) и данных (`data/`) перед обновлением.
 - **Управление копиями**: Удаляет старые резервные копии, сохраняя только две последние при каждом запуске.
+- **Управление логами**: Пересоздаёт лог-файл, если он превышает 1 МБ.
 - **Резервный файл**: Использует локальный файл (`/tmp/test.tar.gz`), если скачивание не удалось.
-- **Полные предварительные проверки**: Проверяет утилиты, свободное место, сеть и DNS.
+- **Полные предварительные проверки**: Проверяет утилиты, свободное место, сеть, DNS и наличие службы.
 - **Детальное логирование**: Все действия записываются в `/var/log/adguardhome-update.log`.
-- **Надёжный DNS**: Использует Cloudflare DNS (1.1.1.1) с IP-резервом для старых версий `curl`.
+- **Гибкий DNS**: Поддерживает настройку DNS-серверов (по умолчанию Cloudflare, можно использовать Яндекс DNS или другие).
 
 ## Требования
 
@@ -34,6 +35,7 @@ sudo apt install curl jq tar dnsutils
 ### Системные требования
 - **Права root**: Скрипт запускается с правами root (через `sudo`).
 - **AdGuard Home**: Установлен в стандартной директории (`/opt/AdGuardHome`).
+- **Служба AdGuard Home**: Настроена как systemd-служба (`adguardhome.service`).
 - **Доступ в интернет**: Необходим для скачивания обновлений и запросов к GitHub.
 - **Свободное место**: Минимум 50 МБ в `/tmp` для временных файлов и копий.
 
@@ -61,6 +63,60 @@ sudo apt install curl jq tar dnsutils
    sudo chmod +x /usr/local/bin/update-adguardhome.sh
    ```
 
+## Настройка службы AdGuard Home
+
+Скрипт требует, чтобы AdGuard Home был настроен как служба systemd (`adguardhome.service`). Если служба не настроена, скрипт выведет пример конфигурации и завершится.
+
+### Создание службы
+1. Создайте файл службы:
+   ```bash
+   sudo nano /etc/systemd/system/adguardhome.service
+   ```
+
+2. Вставьте следующий пример конфигурации:
+   ```ini
+   [Unit]
+   Description=AdGuard Home DNS Service
+   After=network-online.target
+   Wants=network-online.target
+
+   [Service]
+   User=adguard
+   Group=adguard
+   ExecStart=/opt/AdGuardHome/AdGuardHome -c /opt/AdGuardHome/AdGuardHome.yaml
+   Restart=on-failure
+   RestartSec=5
+   AmbientCapabilities=CAP_NET_BIND_SERVICE
+   CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+   ReadWritePaths=/opt/AdGuardHome
+
+   [Install]
+   WantedBy=multi-user.target
+   ```
+
+3. Создайте пользователя и группу `adguard`, если они не существуют:
+   ```bash
+   sudo groupadd -r adguard
+   sudo useradd -r -g adguard -d /opt/AdGuardHome -s /sbin/nologin adguard
+   ```
+
+4. Установите правильные права:
+   ```bash
+   sudo chown -R adguard:adguard /opt/AdGuardHome
+   sudo chmod -R 755 /opt/AdGuardHome
+   ```
+
+5. Активируйте и запустите службу:
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now adguardhome.service
+   ```
+
+6. Проверьте статус службы:
+   ```bash
+   systemctl status adguardhome.service
+   ```
+
 ## Использование
 
 Запустите скрипт вручную для проверки и применения обновлений:
@@ -69,13 +125,14 @@ sudo /usr/local/bin/update-adguardhome.sh
 ```
 
 Скрипт выполняет следующие действия:
-1. Проверяет наличие утилит, свободного места, сети и DNS.
-2. Удаляет старые резервные копии, оставляя две последние.
-3. Сравнивает текущую и последнюю версии AdGuard Home.
-4. Скачивает новую версию (или использует резервный файл).
-5. Создаёт резервную копию конфигурации и данных.
-6. Останавливает службу, обновляет бинарный файл и перезапускает службу.
-7. Записывает все действия в `/var/log/adguardhome-update.log`.
+1. Проверяет размер лог-файла и пересоздаёт его, если он превышает 1 МБ.
+2. Проверяет наличие утилит, службы, свободного места, сети и DNS.
+3. Удаляет старые резервные копии, оставляя две последние.
+4. Сравнивает текущую и последнюю версии AdGuard Home.
+5. Скачивает новую версию (или использует резервный файл).
+6. Создаёт резервную копию конфигурации и данных.
+7. Останавливает службу, обновляет бинарный файл и перезапускает службу.
+8. Записывает все действия в `/var/log/adguardhome-update.log`.
 
 ### Пример вывода
 ```
@@ -108,13 +165,19 @@ DNS работает корректно.
 | `TEMP_DIR`          | `/tmp/AdGuardHome_update`                 | Временная директория для скачивания.            |
 | `BACKUP_DIR`        | `/root/agh-backup`                        | Директория для хранения резервных копий.        |
 | `LOG_FILE`          | `/var/log/adguardhome-update.log`         | Файл логов действий скрипта.                   |
+| `MAX_LOG_SIZE`      | `1048576` (1 МБ)                          | Максимальный размер лог-файла в байтах.         |
 | `ARCH`              | `linux_amd64`                             | Архитектура бинарного файла AdGuard Home.       |
 | `FALLBACK_FILE`     | `/tmp/test.tar.gz`                        | Резервный архив при сбое скачивания.            |
 | `FALLBACK_VERSION`  | `v0.107.61`                               | Резервная версия при недоступности GitHub API.  |
+| `DNS_SERVERS`       | `1.1.1.1` (Cloudflare)                    | DNS-сервер для проверки (можно заменить, например, на `77.88.8.8` для Яндекс DNS). |
 
-Для изменения настроек отредактируйте скрипт:
+Для изменения настроек, например, использования Яндекс DNS, отредактируйте скрипт:
 ```bash
 sudo nano /usr/local/bin/update-adguardhome.sh
+```
+Пример для Яндекс DNS:
+```bash
+DNS_SERVERS="77.88.8.8"
 ```
 
 ## Автоматизация через Cron
@@ -156,6 +219,20 @@ sudo nano /usr/local/bin/update-adguardhome.sh
   sudo rm -rf /root/agh-backup/backup_ГГГГММДД_ЧЧММСС
   ```
 
+## Управление логами
+
+Скрипт проверяет размер лог-файла `/var/log/adguardhome-update.log` и пересоздаёт его, если он превышает 1 МБ. Это предотвращает бесконечный рост логов при ежедневном запуске.
+
+- **Просмотр логов**:
+  ```bash
+  cat /var/log/adguardhome-update.log
+  ```
+
+- **Ручная очистка** (если нужно):
+  ```bash
+  sudo : > /var/log/adguardhome-update.log
+  ```
+
 ## Устранение неполадок
 
 Если скрипт завершился с ошибкой, проверьте лог:
@@ -165,21 +242,24 @@ cat /var/log/adguardhome-update.log
 
 ### Типичные проблемы и решения
 
-1. **Ошибки DNS**:
-   - Убедитесь, что DNS Cloudflare (1.1.1.1) доступен:
-     ```bash
-     nslookup static.adguard.com 1.1.1.1
-     ```
-   - Если AdGuard Home используется как DNS-сервер, убедитесь, что он активен во время проверок, или измените скрипт для другого DNS.
+1. **Отсутствие службы**:
+   - Если скрипт сообщает, что `adguardhome.service` не найдена, следуйте инструкциям в разделе «Настройка службы AdGuard Home».
 
-2. **Ошибки GitHub API**:
+2. **Ошибки DNS**:
+   - Убедитесь, что указанный DNS-сервер (`DNS_SERVERS`) доступен:
+     ```bash
+     nslookup static.adguard.com $DNS_SERVERS
+     ```
+   - Попробуйте другой DNS, например, Яндекс DNS (`77.88.8.8`).
+
+3. **Ошибки GitHub API**:
    - Если лог содержит `jq: parse error` или HTTP-ошибки (403, 429), GitHub API может быть недоступен. Скрипт использует `FALLBACK_VERSION` (`v0.107.61`).
    - Проверьте API вручную:
      ```bash
      curl -s -L https://api.github.com/repos/AdguardTeam/AdGuardHome/releases/latest
      ```
 
-3. **Сбой скачивания**:
+4. **Сбой скачивания**:
    - Если скачивание с `static.adguard.com` не удалось, проверьте резервный файл:
      ```bash
      ls -l /tmp/test.tar.gz
@@ -187,12 +267,6 @@ cat /var/log/adguardhome-update.log
    - Проверьте скачивание вручную:
      ```bash
      curl -L -s -o /tmp/test.tar.gz https://static.adguard.com/adguardhome/release/AdGuardHome_linux_amd64.tar.gz --resolve static.adguard.com:443:104.21.3.203
-     ```
-
-4. **Проблемы со службой**:
-   - Если служба AdGuard Home не запускается/останавливается, проверьте статус:
-     ```bash
-     systemctl status adguardhome.service
      ```
 
 5. **Старая версия `curl`**:
@@ -225,6 +299,7 @@ cat /var/log/adguardhome-update.log
 
 - [AdGuard Team](https://github.com/AdguardTeam/AdGuardHome) за создание AdGuard Home.
 - [Cloudflare](https://1.1.1.1) за надёжный DNS-сервис.
+- [Яндекс](https://dns.yandex.ru) за альтернативный DNS-сервис.
 - Идея проекта вдохновлена необходимостью безопасного и автоматического обновления в рабочих окружениях.
 
 ---
