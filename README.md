@@ -45,7 +45,7 @@ sudo apt install curl jq tar dnsutils
 1. **Скачайте скрипт**:
    Склонируйте репозиторий или скачайте `update-adguardhome.sh`:
    ```bash
-   git clone https://github.com/your-username/adguardhome-auto-update.git
+   git clone https://github.com/wobujidao/adguardhome-auto-update.git
    cd adguardhome-auto-update
    ```
 
@@ -209,7 +209,7 @@ cat /var/log/adguardhome-update.log
 ## Вклад в проект
 
 Приветствуется любой вклад! Чтобы внести изменения:
-1. Сделайте форк репозитория.
+1. Сделайте форк репозитория: https://github.com/wobujidao/adguardhome-auto-update
 2. Создайте ветку для изменений (`git checkout -b feature/ваша-фича`).
 3. Зафиксируйте изменения (`git commit -m "Добавлена ваша фича"`).
 4. Отправьте ветку в репозиторий (`git push origin feature/ваша-фича`).
@@ -229,4 +229,4 @@ cat /var/log/adguardhome-update.log
 
 ---
 
-Если скрипт оказался полезным, поставьте звезду репозиторию на GitHub! Для вопросов или проблем создайте Issue или свяжитесь с автором.
+Если скрипт оказался полезным, поставьте звезду репозиторию на GitHub: https://github.com/wobujidao/adguardhome-auto-update! Для вопросов или проблем создайте Issue или свяжитесь с автором.
