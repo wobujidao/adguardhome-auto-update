@@ -53,6 +53,19 @@ if ! df -h /tmp | grep -q "Avail"; then
 fi
 log "Место на диске в /tmp доступно."
 
+# Очистка старых резервных копий
+log "Очистка старых резервных копий..."
+BACKUP_COUNT=$(ls -1 "$BACKUP_DIR" | grep '^backup_' | wc -l)
+if [[ $BACKUP_COUNT -gt 2 ]]; then
+    ls -1 "$BACKUP_DIR" | grep '^backup_' | sort -r | tail -n +3 | while read -r old_backup; do
+        log "Удаление старой резервной копии: $BACKUP_DIR/$old_backup"
+        rm -rf "$BACKUP_DIR/$old_backup"
+    done
+    # Пересчитываем количество копий после удаления
+    BACKUP_COUNT=$(ls -1 "$BACKUP_DIR" | grep '^backup_' | wc -l)
+fi
+log "Очистка резервных копий завершена. Хранится $BACKUP_COUNT копий."
+
 # Создание директорий, если их нет
 mkdir -p "$BACKUP_DIR" "$TEMP_DIR" "$(dirname "$LOG_FILE")"
 if [[ ! -w "$TEMP_DIR" ]]; then
@@ -65,7 +78,7 @@ log "Директории созданы и доступны для записи
 log "Проверка разрешения DNS для github.com и static.adguard.com..."
 NSLOOKUP_GITHUB=$(nslookup github.com 1.1.1.1 2>&1)
 if [[ $? -ne 0 ]]; then
-    log "Ошибка: Не удалось разрешить github.com через 1.1.1.1. Вывод: $NS_scratchpad
+    log "Ошибка: Не удалось разрешить github.com через 1.1.1.1. Вывод: $NSLOOKUP_GITHUB"
     exit 1
 fi
 NSLOOKUP_ADGUARD=$(nslookup static.adguard.com 1.1.1.1 2>&1)
@@ -217,14 +230,3 @@ fi
 # Проверка новой версии
 NEW_VERSION=$("$AGH_PATH/AdGuardHome" --version | grep -oP 'v\d+\.\d+\.\d+')
 log "Новая установленная версия: $NEW_VERSION"
-
-# Управление резервными копиями: храним только 2 последние
-log "Очистка старых резервных копий..."
-BACKUP_COUNT=$(ls -1 "$BACKUP_DIR" | grep '^backup_' | wc -l)
-if [[ $BACKUP_COUNT -gt 2 ]]; then
-    ls -1 "$BACKUP_DIR" | grep '^backup_' | sort -r | tail -n +3 | while read -r old_backup; do
-        log "Удаление старой резервной копии: $BACKUP_DIR/$old_backup"
-        rm -rf "$BACKUP_DIR/$old_backup"
-    done
-fi
-log "Очистка резервных копий завершена. Хранится $BACKUP_COUNT копий."
