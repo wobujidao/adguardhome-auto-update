@@ -26,12 +26,51 @@ FALLBACK_FILE="/tmp/test.tar.gz"
 FALLBACK_VERSION="v0.107.61"
 # DNS-серверы для проверки (по умолчанию Cloudflare, можно заменить, например, на Яндекс: 77.88.8.8,77.88.8.1)
 DNS_SERVERS="1.1.1.1"
+# Настройки Telegram-уведомлений (отключены по умолчанию)
+ENABLE_TELEGRAM="false"  # Установите "true" для включения уведомлений
+TELEGRAM_BOT_TOKEN=""    # Укажите токен вашего Telegram-бота
+TELEGRAM_CHAT_ID=""      # Укажите ID чата или пользователя
+# Имя сервера (если пустое, используется системное имя хоста)
+SERVER_NAME=""
+
+# Установка имени сервера
+if [[ -z "$SERVER_NAME" ]]; then
+    SERVER_NAME=$(hostname)
+fi
 
 # Функция логирования
 log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
-    echo "$1"
+    local message="[$SERVER_NAME] $1"
+    # Записываем в лог только если файл доступен для записи
+    if [[ -w "$LOG_FILE" ]]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] $message" >> "$LOG_FILE"
+    fi
+    echo "$message"
 }
+
+# Функция отправки уведомлений в Telegram
+send_telegram() {
+    local message="$1"
+    if [[ "$ENABLE_TELEGRAM" == "true" && -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_ID" ]]; then
+        curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
+             -d chat_id="$TELEGRAM_CHAT_ID" \
+             -d text="$message" >/dev/null
+    fi
+}
+
+# Функция обработки ошибок
+handle_error() {
+    local exit_code=$?
+    if [[ $exit_code -ne 0 && "$ENABLE_TELEGRAM" == "true" && -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_ID" ]]; then
+        local log_content
+        log_content=$(tail -n 50 "$LOG_FILE" 2>/dev/null || echo "Лог-файл недоступен")
+        send_telegram "[$SERVER_NAME] Ошибка в скрипте AdGuard Home:\n$log_content"
+    fi
+    exit $exit_code
+}
+
+# Устанавливаем обработчик ошибок
+trap handle_error EXIT
 
 # Проверка прав root
 if [[ $EUID -ne 0 ]]; then
@@ -39,30 +78,42 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
+# Начало выполнения
+log "Запуск скрипта обновления AdGuard Home..."
+
 # Проверка существования директории логов и создание, если отсутствует
 LOG_DIR=$(dirname "$LOG_FILE")
 if [[ ! -d "$LOG_DIR" ]]; then
     mkdir -p "$LOG_DIR"
     if [[ $? -ne 0 ]]; then
-        echo "Ошибка: Не удалось создать директорию логов $LOG_DIR."
+        echo "[$SERVER_NAME] Ошибка: Не удалось создать директорию логов $LOG_DIR."
         exit 1
     fi
 fi
 
-# Проверка размера лог-файла и пересоздание, если > 1 МБ
+# Проверка существования и прав на лог-файл
+if [[ ! -f "$LOG_FILE" ]]; then
+    touch "$LOG_FILE"
+    if [[ $? -ne 0 ]]; then
+        echo "[$SERVER_NAME] Ошибка: Не удалось создать лог-файл $LOG_FILE."
+        exit 1
+    fi
+fi
+if [[ ! -w "$LOG_FILE" ]]; then
+    chmod u+w "$LOG_FILE"
+    if [[ $? -ne 0 ]]; then
+        echo "[$SERVER_NAME] Ошибка: Нет прав на запись в лог-файл $LOG_FILE."
+        exit 1
+    fi
+fi
+
+# Проверка размера лог-файла и пересоздание, если > MAX_LOG_SIZE
 if [[ -f "$LOG_FILE" ]]; then
     LOG_SIZE=$(wc -c < "$LOG_FILE" 2>/dev/null)
     if [[ -n "$LOG_SIZE" && $LOG_SIZE -gt $MAX_LOG_SIZE ]]; then
-        log "Лог-файл превысил 1 МБ ($LOG_SIZE байт), пересоздаём..."
+        log "Лог-файл превысил $(($MAX_LOG_SIZE / 1024)) КБ ($LOG_SIZE байт), пересоздаём..."
         : > "$LOG_FILE"
         log "Лог-файл пересоздан."
-    fi
-else
-    # Создаём лог-файл, если он не существует
-    touch "$LOG_FILE"
-    if [[ $? -ne 0 ]]; then
-        echo "Ошибка: Не удалось создать лог-файл $LOG_FILE."
-        exit 1
     fi
 fi
 
@@ -272,6 +323,12 @@ fi
 sleep 5
 if systemctl is-active --quiet adguardhome.service; then
     log "Обновление успешно завершено. AdGuard Home работает."
+    # Отправляем лог в Telegram при успешном обновлении
+    if [[ "$ENABLE_TELEGRAM" == "true" && -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_ID" ]]; then
+        local log_content
+        log_content=$(tail -n 50 "$LOG_FILE" 2>/dev/null || echo "Лог-файл недоступен")
+        send_telegram "[$SERVER_NAME] AdGuard Home успешно обновлён до $NEW_VERSION:\n$log_content"
+    fi
 else
     log "Ошибка: Служба AdGuard Home не запущена после обновления."
     exit 1
