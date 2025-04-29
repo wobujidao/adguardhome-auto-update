@@ -94,15 +94,38 @@ print_table() {
     log "$table"
 }
 
+# Функция проверки доступности Telegram API
+check_telegram_api() {
+    local response
+    response=$(curl -s --connect-timeout 5 "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/getMe" 2>&1)
+    if [[ $? -ne 0 || "$response" =~ "error_code" || ! "$response" =~ "\"ok\":true" ]]; then
+        log "Ошибка доступа к Telegram API: $response"
+        return 1
+    fi
+    return 0
+}
+
 # Функция отправки уведомлений в Telegram
 send_telegram() {
     local message="$1"
     if [[ "$ENABLE_TELEGRAM" == "true" && -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_ID" ]]; then
-        curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
+        # Проверяем доступность Telegram API
+        check_telegram_api
+        if [[ $? -ne 0 ]]; then
+            log "Пропуск отправки Telegram-уведомления из-за недоступности API"
+            return 1
+        fi
+        local response
+        response=$(curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
              -d chat_id="$TELEGRAM_CHAT_ID" \
              -d text="$message" \
-             -d parse_mode="Markdown" >/dev/null
+             -d parse_mode="Markdown" 2>&1)
+        if [[ $? -ne 0 || "$response" =~ "error_code" ]]; then
+            log "Ошибка отправки Telegram-уведомления: $response"
+            return 1
+        fi
     fi
+    return 0
 }
 
 # Функция обработки ошибок
@@ -113,7 +136,7 @@ handle_error() {
         if [[ "$ENABLE_TELEGRAM" == "true" && -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_ID" ]]; then
             local log_content
             log_content=$(cat "$CURRENT_LOG" 2>/dev/null || echo "Лог текущей операции недоступен")
-            send_telegram "❌ Ошибка на [$SERVER_NAME]:\n\`\`\`\n$log_content\n\`\`\`"
+            send_telegram "❌ Ошибка на $SERVER_NAME:\n\`\`\`\n$log_content\n\`\`\`"
         fi
     fi
     # Очищаем временный лог и добавляем пустую строку в основной лог
@@ -125,10 +148,7 @@ handle_error() {
 # Функция отправки лога в Telegram при завершении (если указан --telegram)
 send_final_telegram() {
     if [[ "$FORCE_TELEGRAM" == "true" && -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_ID" ]]; then
-        print_table
-        local log_content
-        log_content=$(cat "$CURRENT_LOG" 2>/dev/null || echo "Лог текущей операции недоступен")
-        send_telegram "ℹ️ Результат на [$SERVER_NAME]:\n\`\`\`\n$log_content\n\`\`\`"
+        send_telegram "ℹ️ Проверка обновления AdGuard Home на $SERVER_NAME: версия $LATEST_VERSION, установлена $CURRENT_VERSION, обновление не требуется"
     fi
 }
 
@@ -407,7 +427,7 @@ if systemctl is-active --quiet adguardhome.service; then
     log_status "Проверка статуса службы" "ОК"
     # Отправляем краткое уведомление в Telegram при успешном обновлении
     if [[ "$ENABLE_TELEGRAM" == "true" && -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_ID" ]]; then
-        send_telegram "✅ AdGuard на [$SERVER_NAME] обновлён до версии $NEW_VERSION"
+        send_telegram "✅ AdGuard на $SERVER_NAME обновлён до версии $NEW_VERSION"
     fi
 else
     log "Ошибка: Служба AdGuard Home не запущена после обновления."
