@@ -1,0 +1,35 @@
+# Пример конфигурации для update-adguardhome.sh
+
+# Путь к директории установки AdGuard Home
+AGH_PATH="/opt/AdGuardHome"
+
+# Директория для временных файлов
+TEMP_DIR="/tmp/adguardhome_update"
+
+# Директория для резервных копий
+BACKUP_DIR="/opt/AdGuardHome/backup"
+
+# Путь к лог-файлу
+LOG_PATH="/var/log/adguardhome-update.log"
+
+# Имя systemd-юнита (при необходимости измените)
+SERVICE_NAME="adguardhome.service"
+
+# Имя сервера для уведомлений
+SERVER_NAME="$(hostname)"
+
+# DNS-сервера для проверки соединения/резолва
+DNS_SERVERS="1.1.1.1 1.0.0.1"
+
+# Telegram-уведомления
+ENABLE_TELEGRAM="false"
+TELEGRAM_BOT_TOKEN=""
+TELEGRAM_CHAT_ID=""
+
+# Ротация
+# Максимальное число резервных копий, старые будут удаляться (0 — отключить)
+MAX_BACKUP_COUNT=7
+# Ограничение размера лога в байтах (по умолчанию ~5 МБ)
+MAX_LOG_SIZE=5242880
+
+

@@ -3,11 +3,12 @@
 ## Что нового в версии 2.0
 
 ✨ **Основные изменения:**
-- 📁 **Внешний конфигурационный файл** - все настройки вынесены из скрипта
-- 🔒 **Безопасность** - токены и пароли больше не хранятся в коде
-- ⚙️ **Гибкая настройка** - поддержка нескольких расположений конфиг-файла
-- 🆕 **Новые опции** - `--config` для указания файла конфигурации, `--help` для справки
-- 🔧 **Улучшенная обработка ошибок** - лучшая диагностика проблем
+
+- 📁 **Внешний конфигурационный файл** — все настройки вынесены из скрипта
+- 🔒 **Безопасность** — токены и пароли не хранятся в коде
+- ⚙️ **Гибкая настройка** — поддержка нескольких путей поиска конфига
+- 🆕 **Новые опции** — `--config`, `--help`, `--telegram`
+- 🔧 **Улучшенная обработка ошибок** — лучшая диагностика и логирование
 
 ## Быстрая установка
 
@@ -56,11 +57,13 @@ sudo nano /usr/local/bin/config.conf
 ```
 
 **Минимальные настройки для работы:**
+
 - Убедитесь, что `AGH_PATH` указывает на правильную директорию AdGuard Home (`/opt/AdGuardHome`)
 - При необходимости измените `ARCH` (для ARM-серверов)
 - Настройте `DNS_SERVERS` если нужно
 
 **Для Telegram-уведомлений:**
+
 ```bash
 ENABLE_TELEGRAM="true"
 TELEGRAM_BOT_TOKEN="ваш_токен_от_BotFather"
@@ -120,17 +123,20 @@ sudo crontab -e
 ### 2. Получите Chat ID
 
 **Для личного чата:**
+
 1. Напишите сообщение вашему боту
 2. Найдите [@getidsbot](https://t.me/getidsbot) и отправьте `/start`
 3. Скопируйте ваш User ID
 
 **Для группы/канала:**
-1. Добавьте бота в группу/канал как администратора
+
+1. Добавьте бота в группу/канала как администратора
 2. Используйте ID группы/канала (начинается с `-`)
 
 ### 3. Настройте конфигурацию
 
 Отредактируйте `/usr/local/bin/config.conf`:
+
 ```bash
 ENABLE_TELEGRAM="true"
 TELEGRAM_BOT_TOKEN="123456789:ABCDEF1234567890abcdef1234567890ABC"
@@ -150,48 +156,41 @@ sudo /usr/local/bin/update-adguardhome.sh --telegram
 ### Стандартный сервер с Telegram
 
 ```bash
-# Основные пути (стандартные)
 AGH_PATH="/opt/AdGuardHome"
-CONFIG_FILE="/opt/AdGuardHome/AdGuardHome.yaml"
-DATA_DIR="/opt/AdGuardHome/data"
+BACKUP_DIR="/opt/AdGuardHome/backup"
+LOG_PATH="/var/log/adguardhome-update.log"
+SERVICE_NAME="adguardhome.service"
 
-# Telegram
 ENABLE_TELEGRAM="true"
 TELEGRAM_BOT_TOKEN="ваш_токен"
 TELEGRAM_CHAT_ID="ваш_chat_id"
 SERVER_NAME="production-server"
 
-# DNS (Cloudflare)
 DNS_SERVERS="1.1.1.1 1.0.0.1"
+MAX_BACKUP_COUNT=7
+MAX_LOG_SIZE=5242880
 ```
 
 ### ARM-сервер (Raspberry Pi)
 
 ```bash
-# Архитектура ARM
-ARCH="linux_arm64"
-
-# Яндекс DNS (может быть быстрее в России)
-DNS_SERVERS="77.88.8.8 77.88.8.1"
-
-# Нестандартный путь
 AGH_PATH="/home/pi/AdGuardHome"
-CONFIG_FILE="/home/pi/AdGuardHome/AdGuardHome.yaml"
-DATA_DIR="/home/pi/AdGuardHome/data"
+BACKUP_DIR="/home/pi/AdGuardHome/backup"
+LOG_PATH="/var/log/adguardhome-update.log"
+SERVICE_NAME="adguardhome.service"
+
+DNS_SERVERS="77.88.8.8 77.88.8.1"
+MAX_BACKUP_COUNT=7
+MAX_LOG_SIZE=5242880
 ```
 
 ### Сервер без Telegram
 
 ```bash
-# Отключить Telegram
 ENABLE_TELEGRAM="false"
 TELEGRAM_BOT_TOKEN=""
 TELEGRAM_CHAT_ID=""
-
-# Увеличить количество резервных копий
 MAX_BACKUP_COUNT=5
-
-# Увеличить размер лога до 5 МБ
 MAX_LOG_SIZE=5242880
 ```
 
@@ -199,29 +198,32 @@ MAX_LOG_SIZE=5242880
 
 ### Конфигурационный файл не найден
 
-```
+```text
 ОШИБКА: Конфигурационный файл не найден!
 ```
 
 **Решение:**
+
 1. Убедитесь, что файл существует: `ls -la /usr/local/bin/config.conf`
 2. Проверьте права доступа: `sudo chmod 600 /usr/local/bin/config.conf`
 3. Используйте `--config` для указания пути: `--config /path/to/config.conf`
 
 ### Отсутствуют обязательные параметры
 
-```
+```text
 ОШИБКА: В конфигурационном файле отсутствуют обязательные параметры:
 AGH_PATH
 ```
 
 **Решение:**
+
 1. Скопируйте пример: `sudo cp config.conf.example config.conf`
 2. Отредактируйте конфигурацию: `sudo nano /usr/local/bin/config.conf`
 
 ### Проблемы с Telegram
 
 **Решение:**
+
 1. Проверьте токен бота: `curl -s "https://api.telegram.org/bot<TOKEN>/getMe"`
 2. Убедитесь, что бот добавлен в чат/группу
 3. Проверьте Chat ID
@@ -230,6 +232,7 @@ AGH_PATH
 ### Проблемы с правами доступа
 
 **Решение:**
+
 ```bash
 # Восстановите права
 sudo chown root:root /usr/local/bin/config.conf
@@ -243,6 +246,7 @@ sudo chmod +x /usr/local/bin/update-adguardhome.sh
 🔒 **Важные моменты безопасности:**
 
 1. **Права доступа к конфигурации:**
+
    ```bash
    chmod 600 /usr/local/bin/config.conf
    chown root:root /usr/local/bin/config.conf
@@ -250,7 +254,8 @@ sudo chmod +x /usr/local/bin/update-adguardhome.sh
 
 2. **Не добавляйте конфиг в Git:**
    Добавьте в `.gitignore`:
-   ```
+
+   ```text
    config.conf
    *.conf
    ```
@@ -270,9 +275,9 @@ sudo chmod +x /usr/local/bin/update-adguardhome.sh
 
 Если у вас возникли проблемы:
 
-1. Проверьте логи: `cat /var/log/adguardhome-update.log`
+1. Проверьте логи: `sudo tail -n 200 /var/log/adguardhome-update.log`
 2. Запустите с отладкой: `bash -x /usr/local/bin/update-adguardhome.sh`
-3. Создайте Issue на GitHub: https://github.com/wobujidao/adguardhome-auto-update/issues
+3. Создайте Issue на GitHub: [GitHub Issues](https://github.com/wobujidao/adguardhome-auto-update/issues)
 
 ---
 
