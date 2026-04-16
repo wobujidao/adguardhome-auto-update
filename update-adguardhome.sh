@@ -24,6 +24,7 @@ START_TIME=$(date +%s)
 FORCE_TELEGRAM="false"
 CONFIG_FILE_CLI=""
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROLLBACK_BACKUP=""
 
 # Help
 print_help() {
@@ -117,8 +118,7 @@ log_status() {
 
 # Telegram API check
 check_telegram_api() {
-    curl -s --max-time 5 "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/getMe" | grep -q '"ok":true'
-    return $?
+    curl -s --max-time 5 "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe" | grep -q '"ok":true'
 }
 
 # Telegram notification function
@@ -129,8 +129,10 @@ send_telegram() {
             log "Пропуск Telegram-уведомления: API недоступен"
             return 1
         fi
-        local escaped_message=$(echo "$message" | sed 's/[_*\[`]/\\&/g')
-        local response=$(curl -s --max-time 10 -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
+        local escaped_message
+        escaped_message=$(echo "$message" | sed 's/[_*\[`]/\\&/g')
+        local response
+        response=$(curl -s --max-time 10 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -d chat_id="$TELEGRAM_CHAT_ID" \
             -d text="$escaped_message" \
             -d parse_mode="Markdown" 2>&1)
@@ -145,6 +147,33 @@ send_telegram() {
 # Version validation
 validate_version() {
     [[ "$1" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+}
+
+# Rollback: restore files from the latest backup archive
+rollback() {
+    local backup_file="$1"
+    if [[ -z "$backup_file" || ! -f "$backup_file" ]]; then
+        log "Откат невозможен: файл резервной копии не найден ($backup_file)"
+        return 1
+    fi
+    log "Откат: восстановление из $backup_file ..."
+    systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+    if tar -xzf "$backup_file" -C "$AGH_PATH"; then
+        log "Откат: файлы восстановлены."
+    else
+        log "Откат: ОШИБКА распаковки резервной копии!"
+        return 1
+    fi
+    systemctl start "$SERVICE_NAME"
+    if systemctl is-active --quiet "$SERVICE_NAME"; then
+        log "Откат: служба успешно запущена после восстановления."
+        send_telegram "➀‏ AdGuard на $SERVER_NAME: обновление не удалось, выполнен откат к предыдущей версии"
+        return 0
+    else
+        log "Откат: КРИТИЧЕСКАЯ ОШИБКА — служба не запустилась даже после восстановления!"
+        send_telegram "🔴 AdGuard на $SERVER_NAME: критическая ошибка — служба не работает после отката!"
+        return 1
+    fi
 }
 
 # Cleanup on interrupt
@@ -174,7 +203,7 @@ trap handle_error EXIT
 
 # Check required utilities
 log "Проверка утилит..."
-for util in curl tar systemctl grep awk logger find sed; do
+for util in curl tar systemctl grep awk logger find sed sha256sum stat; do
     if ! command -v "$util" &>/dev/null; then
         log "Ошибка: Утилита $util не найдена."
         exit 1
@@ -213,7 +242,7 @@ log_status "Проверка DNS" "ОК"
 log "Проверка места на диске..."
 AVAILABLE_MB=$(df /tmp | awk 'NR==2 {print int($4/1024)}')
 REQUIRED_MB=100
-if [[ $AVAILABLE_MB -lt $REQUIRED_MB ]]; then
+if [[ "$AVAILABLE_MB" -lt "$REQUIRED_MB" ]]; then
     log "Ошибка: Доступно ${AVAILABLE_MB}МБ, требуется ${REQUIRED_MB}МБ"
     exit 1
 fi
@@ -271,31 +300,79 @@ mkdir -p "$TEMP_DIR" || { log "Ошибка создания $TEMP_DIR"; exit 1;
 log_status "Создание директории" "ОК"
 
 # Download latest version
+ARCHIVE_NAME="AdGuardHome_${ARCH_SUFFIX}.tar.gz"
 log "Скачивание версии $LATEST_VERSION..."
-curl -sL --max-time 30 "https://static.adguard.com/adguardhome/release/AdGuardHome_${ARCH_SUFFIX}.tar.gz" -o "$TEMP_DIR/AdGuardHome.tar.gz"
-if [[ $? -ne 0 ]]; then
+if ! curl -sL --max-time 60 "https://static.adguard.com/adguardhome/release/${ARCHIVE_NAME}" -o "$TEMP_DIR/${ARCHIVE_NAME}"; then
     log "Ошибка скачивания."
     rm -rf "$TEMP_DIR"
     exit 1
 fi
 log_status "Скачивание" "ОК"
 
-# Check file integrity
-log "Проверка целостности..."
-FILE_SIZE=$(wc -c < "$TEMP_DIR/AdGuardHome.tar.gz" 2>/dev/null || echo "0")
-if [[ $FILE_SIZE -lt 10485760 ]]; then
+# Check file integrity — size check
+log "Проверка целостности (размер)..."
+FILE_SIZE=$(wc -c < "$TEMP_DIR/${ARCHIVE_NAME}" 2>/dev/null || echo "0")
+if [[ "$FILE_SIZE" -lt 10485760 ]]; then
     log "Ошибка: Файл слишком мал ($FILE_SIZE байт)"
     rm -rf "$TEMP_DIR"
     exit 1
 fi
-log_status "Проверка целостности" "ОК (${FILE_SIZE} байт)"
+log_status "Проверка размера" "ОК (${FILE_SIZE} байт)"
+
+# Check file integrity — SHA256 checksum verification
+log "Проверка контрольной суммы SHA256..."
+CHECKSUMS_URL="https://static.adguard.com/adguardhome/release/checksums.txt"
+CHECKSUMS_FILE="$TEMP_DIR/checksums.txt"
+CHECKSUM_VERIFIED="false"
+
+if curl -sL --max-time 15 "$CHECKSUMS_URL" -o "$CHECKSUMS_FILE" 2>/dev/null && [[ -s "$CHECKSUMS_FILE" ]]; then
+    EXPECTED_HASH=$(grep "${ARCHIVE_NAME}" "$CHECKSUMS_FILE" | awk '{print $1}')
+    if [[ -n "$EXPECTED_HASH" ]]; then
+        ACTUAL_HASH=$(sha256sum "$TEMP_DIR/${ARCHIVE_NAME}" | awk '{print $1}')
+        if [[ "$EXPECTED_HASH" == "$ACTUAL_HASH" ]]; then
+            log "SHA256 совпадает: $ACTUAL_HASH"
+            CHECKSUM_VERIFIED="true"
+            log_status "Проверка SHA256" "ОК"
+        else
+            log "Ошибка: SHA256 не совпадает!"
+            log "  Ожидалось: $EXPECTED_HASH"
+            log "  Получено:  $ACTUAL_HASH"
+            rm -rf "$TEMP_DIR"
+            exit 1
+        fi
+    else
+        log "Предупреждение: запись для ${ARCHIVE_NAME} не найдена в checksums.txt, пропуск проверки SHA256"
+        log_status "Проверка SHA256" "Пропущена"
+    fi
+else
+    log "Предупреждение: не удалось скачать checksums.txt, пропуск проверки SHA256"
+    log_status "Проверка SHA256" "Пропущена"
+fi
+
+# Save original file ownership and permissions before backup
+log "Сохранение прав доступа текущего бинарного файла..."
+ORIG_BINARY="$AGH_PATH/AdGuardHome"
+if [[ -f "$ORIG_BINARY" ]]; then
+    ORIG_OWNER=$(stat -c '%U' "$ORIG_BINARY" 2>/dev/null || echo "root")
+    ORIG_GROUP=$(stat -c '%G' "$ORIG_BINARY" 2>/dev/null || echo "root")
+    ORIG_PERMS=$(stat -c '%a' "$ORIG_BINARY" 2>/dev/null || echo "755")
+    log "Текущие права: ${ORIG_OWNER}:${ORIG_GROUP} ${ORIG_PERMS}"
+else
+    ORIG_OWNER="root"
+    ORIG_GROUP="root"
+    ORIG_PERMS="755"
+    log "Бинарный файл не найден, будут использованы права по умолчанию: ${ORIG_OWNER}:${ORIG_GROUP} ${ORIG_PERMS}"
+fi
+log_status "Сохранение прав доступа" "ОК"
 
 # Create backup
+BACKUP_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+ROLLBACK_BACKUP="$BACKUP_DIR/AdGuardHome_backup_${BACKUP_TIMESTAMP}.tar.gz"
 log "Создание резервной копии..."
 mkdir -p "$BACKUP_DIR"
-tar -czf "$BACKUP_DIR/AdGuardHome_backup_$(date +%Y%m%d_%H%M%S).tar.gz" -C "$AGH_PATH" .
-if [[ $? -ne 0 ]]; then
+if ! tar -czf "$ROLLBACK_BACKUP" -C "$AGH_PATH" .; then
     log "Ошибка создания резервной копии."
+    ROLLBACK_BACKUP=""
     rm -rf "$TEMP_DIR"
     exit 1
 fi
@@ -304,14 +381,14 @@ log_status "Резервное копирование" "ОК"
 # Clean old backups
 log "Очистка старых резервных копий..."
 if [[ "$MAX_BACKUP_COUNT" -gt 0 ]] 2>/dev/null; then
-    ls -1t "$BACKUP_DIR"/AdGuardHome_backup_*.tar.gz 2>/dev/null | awk 'NR>ENVIRON["MAX_BACKUP_COUNT"]' | xargs -r rm -f
+    find "$BACKUP_DIR" -maxdepth 1 -name 'AdGuardHome_backup_*.tar.gz' -type f -printf '%T@ %p\n' 2>/dev/null \
+        | sort -nr | awk -v max="$MAX_BACKUP_COUNT" 'NR>max {print $2}' | xargs -r rm -f
 fi
 log_status "Очистка резервных копий" "ОК"
 
 # Extract new version
 log "Распаковка новой версии..."
-tar -xzf "$TEMP_DIR/AdGuardHome.tar.gz" -C "$TEMP_DIR"
-if [[ $? -ne 0 ]]; then
+if ! tar -xzf "$TEMP_DIR/${ARCHIVE_NAME}" -C "$TEMP_DIR"; then
     log "Ошибка распаковки."
     rm -rf "$TEMP_DIR"
     exit 1
@@ -320,8 +397,7 @@ log_status "Распаковка" "ОК"
 
 # Stop service
 log "Остановка службы AdGuard Home..."
-systemctl stop "$SERVICE_NAME"
-if [[ $? -ne 0 ]]; then
+if ! systemctl stop "$SERVICE_NAME"; then
     log "Ошибка остановки службы."
     rm -rf "$TEMP_DIR"
     exit 1
@@ -330,30 +406,31 @@ log_status "Остановка службы" "ОК"
 
 # Update executable
 log "Обновление исполняемого файла..."
-cp "$TEMP_DIR/AdGuardHome/AdGuardHome" "$AGH_PATH/AdGuardHome" || { log "Ошибка копирования"; systemctl start adguardhome.service; rm -rf "$TEMP_DIR"; exit 1; }
-chmod +x "$AGH_PATH/AdGuardHome"
-if id "adguard" &>/dev/null; then
-    chown adguard:adguard "$AGH_PATH/AdGuardHome"
+if ! cp "$TEMP_DIR/AdGuardHome/AdGuardHome" "$AGH_PATH/AdGuardHome"; then
+    log "Ошибка копирования нового бинарного файла."
+    log "Попытка отката..."
+    rollback "$ROLLBACK_BACKUP"
+    rm -rf "$TEMP_DIR"
+    exit 1
 fi
+chmod "$ORIG_PERMS" "$AGH_PATH/AdGuardHome"
+chown "${ORIG_OWNER}:${ORIG_GROUP}" "$AGH_PATH/AdGuardHome"
 log_status "Обновление файла" "ОК"
 
 # Start service
 log "Запуск службы AdGuard Home..."
 systemctl start "$SERVICE_NAME"
-if [[ $? -ne 0 ]]; then
-    log "Ошибка запуска службы."
+sleep 2
+
+# Verify service is running — rollback if not
+if ! systemctl is-active --quiet "$SERVICE_NAME"; then
+    log "Ошибка: Служба не активна после обновления."
+    log "Запуск автоматического отката..."
+    rollback "$ROLLBACK_BACKUP"
     rm -rf "$TEMP_DIR"
     exit 1
 fi
 log_status "Запуск службы" "ОК"
-
-# Check service status
-log "Проверка статуса службы..."
-if ! systemctl is-active --quiet "$SERVICE_NAME"; then
-    log "Ошибка: Служба не активна после запуска."
-    rm -rf "$TEMP_DIR"
-    exit 1
-fi
 log_status "Статус службы" "ОК"
 
 # Check new version
@@ -361,7 +438,9 @@ log "Проверка новой версии..."
 NEW_VERSION=$("$AGH_PATH/AdGuardHome" --version | grep -E -o 'v[0-9]+\.[0-9]+\.[0-9]+')
 if ! validate_version "$NEW_VERSION"; then
     log "Ошибка: Некорректная новая версия: $NEW_VERSION"
-    systemctl start "$SERVICE_NAME"
+    log "Запуск автоматического отката..."
+    rollback "$ROLLBACK_BACKUP"
+    rm -rf "$TEMP_DIR"
     exit 1
 fi
 log "Новая версия: $NEW_VERSION"
@@ -371,7 +450,11 @@ log_status "Проверка версии" "ОК"
 END_TIME=$(date +%s)
 DURATION=$((END_TIME - START_TIME))
 if [[ ("$ENABLE_TELEGRAM" == "true" || "$FORCE_TELEGRAM" == "true") && -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_ID" ]]; then
-    send_telegram "✅ AdGuard на $SERVER_NAME обновлён до версии $NEW_VERSION за ${DURATION}с"
+    CHECKSUM_NOTE=""
+    if [[ "$CHECKSUM_VERIFIED" == "true" ]]; then
+        CHECKSUM_NOTE=" (SHA256 ✔)"
+    fi
+    send_telegram "✅ AdGuard на $SERVER_NAME обновлён до версии ${NEW_VERSION}${CHECKSUM_NOTE} за ${DURATION}с"
 fi
 
 # Cleanup
